@@ -6,7 +6,7 @@ on:
       version:
         description: Addon image tag (pinned Tdarr 3.01.00 revision)
         required: true
-        default: 3.01.00-2
+        default: 3.01.00-3
         type: string
 
 permissions:
@@ -14,7 +14,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE: ghcr.io/quixthe2nd/tdarr-native-addon
+  IMAGE: ghcr.io/quixthe2nd/tdarr-pro-crack
 
 jobs:
   publish:

@@ -11,7 +11,7 @@ services:
       - "xapi.tdarr.io:127.0.0.1"
 
   tdarr-addon-init:
-    image: ghcr.io/quixthe2nd/tdarr-native-addon:3.01.00-2
+    image: ghcr.io/quixthe2nd/tdarr-pro-crack:3.01.00-3
     command: ["seed", "--target", "/seed"]
     volumes:
       - tdarr-addon-code:/seed
@@ -22,7 +22,7 @@ services:
     restart: "no"
 
   tdarr-addon-verifier:
-    image: ghcr.io/quixthe2nd/tdarr-native-addon:3.01.00-2
+    image: ghcr.io/quixthe2nd/tdarr-pro-crack:3.01.00-3
     command: ["serve", "--from-api"]
     environment:
       TDARR_ADDON_INIT_EMPTY_KEY: "true"

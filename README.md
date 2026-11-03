@@ -1,30 +1,100 @@
-# Tdarr native addon (unofficial)
+# tdarr-pro-crack — local authorization-gate PoC (security research)
 
-This repository publishes a small GHCR image that adds a loopback native-key verifier to an existing Tdarr Compose service. Installation consists only of merging the YAML below into the existing Compose configuration and redeploying. There is no archive, image import, local build, helper script, downloaded override file, Docker socket, or Tdarr Options edit to install.
+[![Skip to PoC instructions](https://img.shields.io/badge/Skip%20to-PoC%20instructions-blue?style=flat-square)](#try-the-poc-docker-compose)
 
-**Scope:** unofficial local licence-check substitution for the exact pinned Tdarr 3.01.00 image below, Linux/amd64, with Tdarr authentication disabled for its local API. It does not change UI authentication settings and does not support other Tdarr versions or an authenticated local API.
+This is a source-linked security-research report and a working, narrowly pinned proof of concept (PoC) for Tdarr 3.01.00 on Linux/amd64. The PoC changes one URL literal in the native server executable, redirects its verification request to a loopback helper, and observes how the real server handles strictly typed verification responses. The Compose configuration packages that experiment without distributing a modified Tdarr binary.
 
-The selected compiled verification request is redirected to a server bound only to `127.0.0.1`. The helper compares the presented key with the locally saved Tdarr key; other proxied vendor requests continue over HTTPS to `api.tdarr.io`. This is not a vendor licence, activation, or entitlement. The native patch changes only the selected 20-byte URL literal, leaving the updater URLs unchanged:
+**Scope boundary:** this is a lab/disposable-code PoC that **requires executable modification**. It does not demonstrate remote access, an unauthenticated remote compromise, or TLS compromise of an unmodified binary. In the unmodified control, the test certificate was rejected before response parsing. The local marker described below is not a vendor licence, activation, subscription, or entitlement, and the results do not establish that remote-service-dependent features will work.
 
-| State | SHA-256 |
+**Attacker prerequisites and impact:** the operator must be able to replace the Tdarr executable or control its Docker deployment, including startup and host mapping. This is a local licence/entitlement-gate bypass under code tampering, not a bypass of Tdarr login authentication. The measured protected resource is Worker Verdict History; no broader Pro-feature coverage or remote attack path is claimed. A JSON boolean received over correctly authenticated HTTPS is not shown to be forgeable here—the PoC changes that transport destination first.
+
+## What each code part does
+
+All source links below pin the executable sources at commit [`6b3a8ff01416f951baa0a596f5a86ef8e8778b9e`](https://github.com/QuixThe2nd/tdarr-pro-crack/tree/6b3a8ff01416f951baa0a596f5a86ef8e8778b9e). The two helper files are unchanged in this documentation and image-rebranding revision.
+
+1. **Patch guards and data replacement** — [`native_verifier.py:L20-L43`](https://github.com/QuixThe2nd/tdarr-pro-crack/blob/6b3a8ff01416f951baa0a596f5a86ef8e8778b9e/native_verifier.py#L20-L43) defines the expected hashes, URL literals, surrounding binary context, and limits. [`patch_binary`, `L73-L127`](https://github.com/QuixThe2nd/tdarr-pro-crack/blob/6b3a8ff01416f951baa0a596f5a86ef8e8778b9e/native_verifier.py#L73-L127) refuses an unknown input hash, a non-unique context, a changed input during reading, or an unexpected output hash. It replaces only `https://api.tdarr.io` with `http://xapi.tdarr.io`, checks that the file length is unchanged and exactly three bytes differ, and verifies the resulting hash before writing a mode-`0555` output.
+
+   **Compiler suffix constraint:** the measured native constructor loads the literal's first 16 bytes and then appends an instruction-embedded `r.io`. A data-only replacement therefore has to remain 20 bytes long and suffix-compatible; an arbitrary hostname would leave the embedded suffix inconsistent. Removing `s` from `https` frees one byte and adding `x` to `api` consumes it, which is why the same-length `xapi.tdarr.io` hostname was selected. The suffix check is visible at [`native_verifier.py:L81-L84`](https://github.com/QuixThe2nd/tdarr-pro-crack/blob/6b3a8ff01416f951baa0a596f5a86ef8e8778b9e/native_verifier.py#L81-L84). Both separate updater URL literals remain untouched; their occurrence count is guarded before and after patching at [`L85-L97`](https://github.com/QuixThe2nd/tdarr-pro-crack/blob/6b3a8ff01416f951baa0a596f5a86ef8e8778b9e/native_verifier.py#L85-L97).
+
+2. **Loopback DNS guard** — [`check_loopback_dns`, `native_verifier.py:L130-L140`](https://github.com/QuixThe2nd/tdarr-pro-crack/blob/6b3a8ff01416f951baa0a596f5a86ef8e8778b9e/native_verifier.py#L130-L140) resolves `xapi.tdarr.io` and requires the complete address set to be exactly `127.0.0.1`. An empty, external, or mixed answer aborts startup instead of sending the redirected request elsewhere.
+
+3. **Atomic in-place replacement and entrypoint** — [`patch_in_place`, `native_verifier.py:L143-L166`](https://github.com/QuixThe2nd/tdarr-pro-crack/blob/6b3a8ff01416f951baa0a596f5a86ef8e8778b9e/native_verifier.py#L143-L166) accepts either exact known hash, creates a temporary file beside the executable, preserves its mode and ownership, uses `os.replace` for atomic replacement, and verifies the installed hash. [`entrypoint.sh:L1-L6`](https://github.com/QuixThe2nd/tdarr-pro-crack/blob/6b3a8ff01416f951baa0a596f5a86ef8e8778b9e/entrypoint.sh#L1-L6) runs that patch before executing Tdarr's normal `/init`; a failed guard prevents `/init` from running. Recreating from the unmodified upstream image discards the writable-layer modification.
+
+4. **Loopback verifier server and strict parser** — [`VerifierServer`, `native_verifier.py:L225-L258`](https://github.com/QuixThe2nd/tdarr-pro-crack/blob/6b3a8ff01416f951baa0a596f5a86ef8e8778b9e/native_verifier.py#L225-L258) permits only a `127.0.0.1` bind and applies socket timeouts. [`VerifierHandler`, `L261-L346`](https://github.com/QuixThe2nd/tdarr-pro-crack/blob/6b3a8ff01416f951baa0a596f5a86ef8e8778b9e/native_verifier.py#L261-L346) requires an ASCII origin-form request target, rejects fragments and control characters, refuses `CONNECT`, rejects transfer encoding and ambiguous or invalid content lengths, and caps request bodies at 1 MiB. Only `POST /api/v2/verify-key` and `GET /__health` receive local handling.
+
+5. **Key match and false controls** — [`_verify`, `native_verifier.py:L348-L367`](https://github.com/QuixThe2nd/tdarr-pro-crack/blob/6b3a8ff01416f951baa0a596f5a86ef8e8778b9e/native_verifier.py#L348-L367) strictly decodes JSON, accepts only a string in a top-level object's `tdarrKey` field, and compares its UTF-8 bytes with the locally saved key using `hmac.compare_digest`. A matching key returns the literal JSON boolean `true`; the helper does not ask the vendor whether that locally saved key is a valid licence. A wrong, blank, missing, non-string, or otherwise invalid candidate returns JSON `false` (or HTTP 400 for malformed JSON), never stringly typed truth. The real-server false and string-`"true"` controls below demonstrate why that type distinction matters.
+
+6. **Bounded HTTPS proxy passthrough** — [`_proxy`, `native_verifier.py:L369-L411`](https://github.com/QuixThe2nd/tdarr-pro-crack/blob/6b3a8ff01416f951baa0a596f5a86ef8e8778b9e/native_verifier.py#L369-L411) forwards other request paths to `api.tdarr.io:443` through the standard-library HTTPS client, rather than treating the local listener as a generic CONNECT proxy. It removes `Host`, content-length, and hop-by-hop headers, forwards the remaining request, and returns the upstream status, body, and permitted headers. [`bounded_response`, `L212-L222`](https://github.com/QuixThe2nd/tdarr-pro-crack/blob/6b3a8ff01416f951baa0a596f5a86ef8e8778b9e/native_verifier.py#L212-L222) caps a proxied response at 16 MiB; network timeouts and upstream failures produce a bounded error instead of an unbounded wait or response.
+
+7. **API bootstrap, full-object settings, and empty-key option** — [`native_verifier.py:L414-L465`](https://github.com/QuixThe2nd/tdarr-pro-crack/blob/6b3a8ff01416f951baa0a596f5a86ef8e8778b9e/native_verifier.py#L414-L465) provides bounded local API requests and reads `SettingsGlobalJSONDB` as a complete bare JSON object. [`bootstrap_key`, `L491-L504`](https://github.com/QuixThe2nd/tdarr-pro-crack/blob/6b3a8ff01416f951baa0a596f5a86ef8e8778b9e/native_verifier.py#L491-L504) trims and uses an existing nonempty key without writing. If the key is empty and `TDARR_ADDON_INIT_EMPTY_KEY=true`, it re-reads the latest object, preserves an intervening nonempty key, or opts into initialization. [`initialize_empty_key`, `L468-L488`](https://github.com/QuixThe2nd/tdarr-pro-crack/blob/6b3a8ff01416f951baa0a596f5a86ef8e8778b9e/native_verifier.py#L468-L488) permits one write attempt, changes only `tdarrKey` in a copy of that latest full object, and verifies both a nonempty saved key and unchanged non-key fields on readback. The image default is `false`.
+
+8. **Health and bounded bootstrap retry** — [`bootstrap_api`, `native_verifier.py:L507-L538`](https://github.com/QuixThe2nd/tdarr-pro-crack/blob/6b3a8ff01416f951baa0a596f5a86ef8e8778b9e/native_verifier.py#L507-L538) starts bootstrap alongside the already-listening server, allows at most 30 attempts with two-second retry intervals, and requires the real local `auth-status` call to return literal JSON `true` before readiness. A failed or unverified initialization write fails closed without another write; after verified initialization, an auth-status retry does not rewrite the key. [`healthcheck`, `L584-L591`](https://github.com/QuixThe2nd/tdarr-pro-crack/blob/6b3a8ff01416f951baa0a596f5a86ef8e8778b9e/native_verifier.py#L584-L591) accepts only HTTP 200 with the exact ready object, while the server's failed state clears its key.
+
+9. **Dockerfile with two scripts** — [`Dockerfile:L1-L7`](https://github.com/QuixThe2nd/tdarr-pro-crack/blob/6b3a8ff01416f951baa0a596f5a86ef8e8778b9e/Dockerfile#L1-L7) starts from a digest-pinned Python Alpine base and copies only `native_verifier.py` and `entrypoint.sh`, both read-only/executable. Its default command seeds those two files into a volume. The image does not contain the Tdarr executable, a licence, credentials, media, or user settings.
+
+10. **Compose namespace sharing** — [`compose.addon.yaml:L1-L49`](https://github.com/QuixThe2nd/tdarr-pro-crack/blob/6b3a8ff01416f951baa0a596f5a86ef8e8778b9e/compose.addon.yaml#L1-L49) uses an init service to seed the scripts and requires successful completion before `tdarr` starts. The `tdarr` service supplies the loopback host mapping and wrapper entrypoint. The verifier uses `network_mode: service:tdarr`, so its loopback listener and the patched process share one network namespace. No verifier port is published and no Docker socket is mounted; the verifier is otherwise read-only and drops capabilities except the bind capability it needs.
+
+## Measured evidence
+
+**Provenance:** the five-case lab evidence comes from the authoritative `RESULTS.md` lab report, and the integration results come from previous public-image tests. These are existing measurements, not a new Docker run performed for this documentation revision. Private and homelab evidence files are intentionally not linked or distributed here.
+
+### Exact artifact and patch
+
+| Measurement | Verified local result |
 | --- | --- |
-| Required original native binary | `b9346a2b7408b3faebcab16788cc26bf544cf090dc3a49a0e8a7db70a192a338` |
-| Required patched native binary | `94c94523d7826ee67a7d981aff10379158e4eefb9cf9c920e3d979cc2dad74b2` |
+| Source original native binary SHA-256 | `b9346a2b7408b3faebcab16788cc26bf544cf090dc3a49a0e8a7db70a192a338` |
+| Patched disposable native binary SHA-256 | `94c94523d7826ee67a7d981aff10379158e4eefb9cf9c920e3d979cc2dad74b2` |
+| Selected literal | 20-byte `https://api.tdarr.io` at file offset **1969348** |
+| Actual binary delta | Exactly **3 bytes changed** inside that literal; file size unchanged |
+| Constructor detail | First 16 literal bytes loaded, then instruction-embedded `r.io` appended |
+| Updater literals | Both updater URL literals remain untouched |
+| Final evidence marker | `EXPERIMENT_COMPLETE=true` and `HYPOTHESIS_OUTCOME=SUPPORTED` |
 
-The addon image contains only its two Python/shell helper scripts on a pinned Python base. It does not bundle the Tdarr binary, a licence, credentials, or user data.
+### Five real-server cases
 
-## Before changing Compose
+The verification endpoint was the fixture under test; Tdarr's own settings, cached authorization status, and Worker Verdict History endpoint supplied the auth/history results. No auth-status or history response was mocked.
 
-- The existing Tdarr service must be named `tdarr`. Its normal `/init` startup is retained through the wrapper entrypoint.
-- The `ghcr.io/haveagitgat/tdarr@sha256:5b3b8d4e54f41738d12ff71705cf8eb8e90fcbcc05209c331853aef119879992` reference pins the supported upstream 3.01.00 image by digest. The `3.01.00-2` tag applies to the addon image, not to a moving upstream release.
-- Do not use this configuration as a blind downgrade. If the current installation uses a different or newer Tdarr image, stop instead of replacing it with this pin without a separate compatibility decision.
-- Wait for active Tdarr jobs to finish before recreating containers. Keep authentication disabled as required by this narrowly supported configuration; do not make UI authentication changes for this addon.
+| Case | Verification request/response | Matching POST observed | Real auth state | Real history result |
+| --- | --- | --- | --- | --- |
+| Original binary, untrusted HTTPS control certificate | Certificate rejected; response parser was never reached | No | `false` | HTTP 403 |
+| Redirected binary, JSON `false` | Local fixture returned boolean `false` | Yes | `false` | HTTP 403 |
+| Redirected binary, JSON string `"true"` | Local fixture returned a string, not a boolean | Yes | `false` | HTTP 403 |
+| Redirected binary, JSON boolean `true` | Local fixture returned literal `true` | Yes | `true` | HTTP 200 with **24 genuine empty hourly buckets** |
+| Fresh redirected process and fresh database, JSON `false` | New false control after the positive case | Yes | `false` | HTTP 403 |
 
-## Merge into the existing Compose configuration
+The 24 buckets were generated by the real server from an empty lab database; every count was zero. They are not production history or a fabricated fixture response. The fresh false control rules out explaining the positive case solely through reuse of the preceding authorized process or database.
 
-Merge these services, fields, and volumes into the existing Compose project. This is a YAML fragment to copy into that configuration, **not** a standalone override to download.
+Previous public-image tests reported **36/36 fixture checks**, **5/5 focused initialization assertions**, **25/25 lifecycle acceptance checks**, and **8/8 empty-key acceptance checks** passing. For the `3.01.00-3` rebrand, the 36 fixture checks, 5 initialization assertions, 25 Docker lifecycle checks, and 8 empty-key checks also passed against the unchanged helper sources and a fresh local image build. Published-artifact verification, including the exact GHCR digest, is recorded separately in the [versioned release](https://github.com/QuixThe2nd/tdarr-pro-crack/releases/tag/3.01.00-3).
 
-Preserve the existing `tdarr` media mappings, GPU settings, configuration/server/log volumes, ports, environment, command, and other service options. Add the code volume and host entry to their existing lists, and add `tdarr-addon-init` to any existing `depends_on` entries rather than removing other dependencies. Likewise, add `tdarr-addon-code` to the existing top-level volumes without removing current volumes.
+## Recommended fixes for Tdarr
+
+These are recommendations for upstream evaluation, not claims that a vendor fix has landed or that an unproven patch is already effective.
+
+1. **State the threat model explicitly.** An operator who controls Docker and can replace executable bytes can also patch local verification logic. Neither a hidden URL nor an integrity check inside that same mutable executable can guarantee enforcement against that operator.
+2. **Consider signed entitlement claims as defence in depth.** A vendor-signed claim with audience, expiry and replay protections would resist this particular response-substitution technique while its verifier remains intact. It would not make arbitrary client modification impossible; the current observation does not establish that correctly validated HTTPS is insecure.
+3. **Enforce vendor-hosted operations at the vendor boundary.** Where a feature already depends on a remote service, validate entitlement there independently of a client boolean. Moving purely local history processing off-host is a separate product/privacy decision, not a demonstrated drop-in fix.
+4. **Protect deployment integrity against less-privileged tampering.** Signed updates/images, verified deployment digests, restricted Docker access and read-only executable mounts can reduce unintended modification. They do not stop a host administrator who can replace those controls. Retain hostname/certificate validation: the unmodified TLS control correctly rejected the test certificate.
+5. **Keep regression controls specific.** Test boolean-versus-string responses, false responses after a fresh restart, invalid or replayed claims if introduced, endpoint retargeting and image-integrity failures. Preserve updater behavior and document which controls assume an intact executable.
+
+## Responsible disclosure
+
+This repository is public and includes a working PoC. The report is intended for upstream Tdarr review and defensive regression testing. No coordinated private disclosure window, vendor acknowledgement, or vendor fix is claimed.
+
+## Image publication
+
+The Compose configuration below uses `ghcr.io/quixthe2nd/tdarr-pro-crack:3.01.00-3`. Maintainers publish that reference through the manual **Publish addon image** workflow, which runs the image self-test before its push step. The `3.01.00-3` tag is the addon image revision; the separately pinned upstream image remains Tdarr 3.01.00. See the versioned release for the published manifest digest and verification results.
+
+## Try the PoC (Docker Compose)
+
+Use this only in a disposable lab where the exact pinned Tdarr 3.01.00/Linux-amd64 binary is appropriate. **Tdarr local API authentication must already be off**; this configuration does not set or change UI/API authentication. The existing Tdarr Compose service must be named `tdarr`, using the official standard `/init` startup. Custom entrypoints/startup wrappers are outside the tested configuration; do not silently overwrite them.
+
+Wait for active Tdarr jobs to finish before recreating containers. Do not replace a different or newer installation with the pinned image as a blind downgrade; stop and make a separate compatibility decision instead.
+
+The procedure is only a YAML merge followed by normal Compose redeployment. It does not require downloaded helper scripts or archives, a source clone or local build, an image import, or a Tdarr Options key edit.
+
+### Merge the complete fragment
+
+Copy these services, fields, and volume declarations into the existing Compose project; this is a fragment, not a standalone file to download. Preserve every pre-existing media/configuration/server/log mapping, GPU/device setting, port, environment variable, command, and other service option. Add the code mount and host entry to their existing lists, add `tdarr-addon-init` without removing existing dependencies, and add `tdarr-addon-code` without removing existing top-level volumes.
 
 ```yaml
 services:
@@ -40,7 +110,7 @@ services:
       - "xapi.tdarr.io:127.0.0.1"
 
   tdarr-addon-init:
-    image: ghcr.io/quixthe2nd/tdarr-native-addon:3.01.00-2
+    image: ghcr.io/quixthe2nd/tdarr-pro-crack:3.01.00-3
     command: ["seed", "--target", "/seed"]
     volumes:
       - tdarr-addon-code:/seed
@@ -51,7 +121,7 @@ services:
     restart: "no"
 
   tdarr-addon-verifier:
-    image: ghcr.io/quixthe2nd/tdarr-native-addon:3.01.00-2
+    image: ghcr.io/quixthe2nd/tdarr-pro-crack:3.01.00-3
     command: ["serve", "--from-api"]
     environment:
       TDARR_ADDON_INIT_EMPTY_KEY: "true"
@@ -78,40 +148,36 @@ volumes:
   tdarr-addon-code:
 ```
 
-The verifier shares the `tdarr` network namespace so that the patched hostname resolves only to that service's loopback interface. No verifier port is published and no `/var/run/docker.sock` mount is needed or supported.
+The shown `TDARR_ADDON_INIT_EMPTY_KEY: "true"` explicitly opts into initializing an actually empty saved `tdarrKey` with a random `TDARR-ADDON-LOCAL-…` marker. With the default `false`, an empty key leaves the verifier unhealthy. An existing nonempty key is used without an initialization write.
 
-### Empty-key initialization
+Initialization re-reads and submits the full latest global-settings object because the local CRUD API requires full-object update. It changes only `tdarrKey` and verifies readback, but the API provides no atomic compare-and-swap guarantee: avoid concurrent global-settings edits during first initialization because they can be overwritten or make verification fail.
 
-The image default for `TDARR_ADDON_INIT_EMPTY_KEY` is `false`; the explicit `"true"` above opts in. With the flag enabled, an actually empty saved `tdarrKey` is initialized through Tdarr's existing local `SettingsGlobalJSONDB` CRUD API. The verifier reads the full global-settings object and re-reads it immediately before initialization. If that second read observes a nonempty key, it uses that key without writing; otherwise it changes only `tdarrKey` in the latest object, performs one bounded update attempt, and reads the object back before becoming healthy. API retries are bounded and do not repeat the initialization write in the same verifier process. A failed initialization write or readback verification fails bootstrap closed instead of accepting the saved key on a later retry.
+**The generated marker is not vendor entitlement or proof of a Tdarr licence. It is stored in Tdarr global settings and persists after addon removal or rollback.**
 
-An existing nonempty saved key observed at initialization is left unchanged, whether the flag is enabled or disabled. Other global settings are submitted unchanged from the latest pre-initialization read in the required full-object update and checked on readback. The API has no atomic compare-and-swap (CAS) guarantee, so avoid editing global settings while first initialization runs; a concurrent edit can be overwritten or cause verification to fail. With the flag disabled, an empty key leaves the verifier unhealthy rather than inventing one.
+### Deploy and check
 
-The generated `TDARR-ADDON-LOCAL-…` value is only a random local marker for this unofficial key comparison. **It is not vendor entitlement or proof of a Tdarr licence.** It is stored in Tdarr's global settings and remains there after addon removal or rollback; rolling back does not restore an empty key or remove that marker.
-
-## Deploy and verify
-
-From the existing Compose project, run the standard update command:
+From the existing merged Compose project, run:
 
 ```sh
 docker compose up -d
 ```
 
-For Portainer, save the merged stack configuration and use its normal **Redeploy** action. Compose pulls the published addon image directly from GHCR; no local preparation is required.
+For Portainer, save the merged stack and use its normal **Redeploy** action. Compose pulls the addon image directly from GHCR.
 
-Then confirm that the init container exited successfully and the verifier is healthy:
+Check that initialization exited successfully and the verifier became healthy:
 
 ```sh
 docker compose ps -a tdarr tdarr-addon-init tdarr-addon-verifier
 ```
 
-`tdarr-addon-init` must show exit code 0, and `tdarr-addon-verifier` must report `healthy`. The init container only seeds the two helper scripts into `tdarr-addon-code`; the long-running verifier waits for the local API and saved key.
+`tdarr-addon-init` must have exit code 0 and `tdarr-addon-verifier` must report `healthy`. Do not treat a running but unhealthy verifier as a successful result.
 
-## Rollback
+### Roll back through Compose only
 
-Wait for active jobs to finish. In the existing Compose configuration:
+Wait for active jobs to finish, then edit the existing Compose configuration:
 
-1. Restore the previous known-compatible `tdarr` image reference; do not blindly downgrade it.
-2. Remove only the addon's `entrypoint`, `tdarr-addon-init` dependency, `tdarr-addon-code` mount, and `xapi.tdarr.io` host entry from `tdarr`. Preserve every pre-existing service field and volume.
+1. Restore the previous known-compatible `tdarr` image reference; do not blindly downgrade a newer installation.
+2. Remove only the addon `entrypoint`, `tdarr-addon-init` dependency, `tdarr-addon-code` mount, and `xapi.tdarr.io` host entry from `tdarr`, preserving every pre-existing field and volume.
 3. Remove the `tdarr-addon-init` and `tdarr-addon-verifier` services and the top-level `tdarr-addon-code` declaration.
 4. Recreate from the edited configuration and remove orphaned addon containers:
 
@@ -119,8 +185,4 @@ Wait for active jobs to finish. In the existing Compose configuration:
    docker compose up -d --force-recreate --remove-orphans
    ```
 
-Do **not** use `docker compose down -v`, and do not delete Tdarr configuration, server, log, media, or database volumes. Recreation from the unmodified upstream image discards the patched writable-layer binary. The generated local marker intentionally persists in global settings after rollback and still confers no vendor entitlement.
-
-## Publication
-
-Maintainers publish `ghcr.io/quixthe2nd/tdarr-native-addon:3.01.00-2` through the manual **Publish addon image** GitHub Actions workflow. The workflow uses the repository's `GITHUB_TOKEN`, runs the image self-test before push, and is not triggered by README or other source pushes. End users only reference the resulting image in Compose.
+Do not use `docker compose down -v`, and do not delete Tdarr configuration, server, log, media, or database volumes. Recreation from the unmodified upstream image discards the patched writable-layer executable. The generated local marker intentionally remains in global settings after rollback and still confers no vendor entitlement.
