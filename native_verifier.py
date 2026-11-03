@@ -8,6 +8,7 @@ import http.client
 import http.server
 import json
 import os
+import secrets
 from pathlib import Path
 import signal
 import socket
@@ -37,6 +38,8 @@ AUTH_STATUS_PATH = "/api/v2/auth-status"
 BOOTSTRAP_ATTEMPTS = 30
 BOOTSTRAP_RETRY_SECONDS = 2
 API_TIMEOUT = 5
+INIT_EMPTY_KEY_ENV = "TDARR_ADDON_INIT_EMPTY_KEY"
+LOCAL_KEY_PREFIX = "TDARR-ADDON-LOCAL-"
 SEED_FILES = ("native_verifier.py", "entrypoint.sh")
 MAX_REQUEST = 1024 * 1024
 MAX_RESPONSE = 16 * 1024 * 1024
@@ -446,15 +449,59 @@ def read_global_settings():
     return document
 
 
-def bootstrap_key():
-    document = read_global_settings()
+def update_global_settings(document):
+    api_request(SETTINGS_PATH, {"data": {
+        "collection": "SettingsGlobalJSONDB",
+        "mode": "update",
+        "docID": "globalsettings",
+        "obj": document,
+    }})
+
+
+def settings_key(document):
     stored_key = document.get("tdarrKey", "")
     if not isinstance(stored_key, str):
         raise BootstrapError("tdarrKey was not a string")
+    return stored_key
+
+
+def initialize_empty_key(document, initialization):
+    if initialization["write_attempted"]:
+        raise BootstrapError("empty-key initialization was already attempted")
+    initialization["write_attempted"] = True
+
+    marker = LOCAL_KEY_PREFIX + secrets.token_hex(16)
+    updated = dict(document)
+    updated["tdarrKey"] = marker
+    update_global_settings(updated)
+
+    readback = read_global_settings()
+    original_fields = {key: value for key, value in document.items() if key != "tdarrKey"}
+    readback_fields = {key: value for key, value in readback.items() if key != "tdarrKey"}
+    if readback_fields != original_fields:
+        raise BootstrapError("non-key settings changed during empty-key initialization")
+    stored_key = settings_key(readback)
     key = stored_key.strip()
     if not key:
-        raise BootstrapError("tdarrKey is empty")
+        raise BootstrapError("empty-key initialization readback was empty")
+    initialization["verified"] = True
     return key
+
+
+def bootstrap_key(initialization=None):
+    document = read_global_settings()
+    key = settings_key(document).strip()
+    if key:
+        return key
+    if initialization is None or not initialization["enabled"]:
+        raise BootstrapError("tdarrKey is empty")
+
+    # Use the latest object and preserve a key supplied since the first read.
+    document = read_global_settings()
+    key = settings_key(document).strip()
+    if key:
+        return key
+    return initialize_empty_key(document, initialization)
 
 
 def bootstrap_api(server):
@@ -462,9 +509,14 @@ def bootstrap_api(server):
         server.mark_failed()
         print("API_BOOTSTRAP=failed", file=sys.stderr, flush=True)
         return
+    initialization = {
+        "enabled": os.environ.get(INIT_EMPTY_KEY_ENV, "false").lower() == "true",
+        "write_attempted": False,
+        "verified": False,
+    }
     for attempt in range(1, BOOTSTRAP_ATTEMPTS + 1):
         try:
-            key = bootstrap_key()
+            key = bootstrap_key(initialization)
             server.set_key(key)
             # The HTTP server is already listening; auth-status can call verify-key.
             body = api_request(AUTH_STATUS_PATH, {"data": {"saU": True}})
@@ -478,6 +530,8 @@ def bootstrap_api(server):
             print("API_BOOTSTRAP=ready", flush=True)
             return
         except (BootstrapError, UnicodeError, OSError, VerifierError):
+            if initialization["write_attempted"] and not initialization["verified"]:
+                break
             if attempt < BOOTSTRAP_ATTEMPTS:
                 time.sleep(BOOTSTRAP_RETRY_SECONDS)
     server.mark_failed()

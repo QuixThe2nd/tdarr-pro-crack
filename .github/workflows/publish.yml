@@ -1,0 +1,63 @@
+name: Publish addon image
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Addon image tag (pinned Tdarr 3.01.00 revision)
+        required: true
+        default: 3.01.00-2
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/quixthe2nd/tdarr-native-addon
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Validate version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "$VERSION" =~ ^3\.01\.00-[0-9]+$ ]]; then
+            printf 'Version must match 3.01.00-N\n' >&2
+            exit 1
+          fi
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      - name: Build image
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          docker build \
+            --platform linux/amd64 \
+            --pull \
+            --tag "$IMAGE:$VERSION" \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.version=$VERSION" \
+            .
+
+      - name: Run image self-test
+        env:
+          VERSION: ${{ inputs.version }}
+        run: docker run --rm --platform linux/amd64 "$IMAGE:$VERSION" self-test
+
+      - name: Push image
+        env:
+          VERSION: ${{ inputs.version }}
+        run: docker push "$IMAGE:$VERSION"
