@@ -1,0 +1,6 @@
+__pycache__/
+.pycache/
+.verification-cache/
+verification/results/
+verification/scratch-*/
+.hermes-claude-goal-brief.md

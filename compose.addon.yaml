@@ -1,0 +1,47 @@
+services:
+  tdarr:
+    image: ghcr.io/haveagitgat/tdarr@sha256:5b3b8d4e54f41738d12ff71705cf8eb8e90fcbcc05209c331853aef119879992
+    entrypoint: ["/opt/tdarr-addon/entrypoint.sh"]
+    depends_on:
+      tdarr-addon-init:
+        condition: service_completed_successfully
+    volumes:
+      - tdarr-addon-code:/opt/tdarr-addon:ro
+    extra_hosts:
+      - "xapi.tdarr.io:127.0.0.1"
+
+  tdarr-addon-init:
+    image: tdarr-native-addon:3.01.00-1
+    command: ["seed", "--target", "/seed"]
+    volumes:
+      - tdarr-addon-code:/seed
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  tdarr-addon-verifier:
+    image: tdarr-native-addon:3.01.00-1
+    command: ["serve", "--from-api"]
+    network_mode: service:tdarr
+    depends_on:
+      tdarr:
+        condition: service_started
+        restart: true
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/python3", "-B", "-I", "/opt/tdarr-addon/native_verifier.py", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  tdarr-addon-code:
